@@ -143,3 +143,8 @@ local.settings.json
 # Deploy scripts with sensitive data
 deploy.sh
 api/deploy.sh
+
+# Old files with exposed secrets
+web/original-app.js
+web/original-styles.css
+web/original-app.js
