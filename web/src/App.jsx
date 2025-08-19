@@ -279,127 +279,211 @@ export default function App() {
 
   const fetchDataCenters = async (lat, lng) => {
     setLoadingDataCenters(true);
-    console.log("🔍 Starting AI data center search for:", lat, lng);
+    console.log("🔍 Starting real data center search for:", lat, lng);
     
     try {
-      // More specific search terms for AI and technology facilities
-      const searchTerms = [
-        'data center',
-        'server farm',
-        'technology campus',
-        'computing facility',
-        'AI facility',
-        'machine learning',
-        'cloud computing',
-        'technology company',
-        'tech campus',
-        'digital facility'
-      ];
+      let allDataCenters = [];
       
-      let allResults = [];
-      
-      // Search for each term with better error handling
-      for (const term of searchTerms) {
-        try {
-          const searchUrl = `https://atlas.microsoft.com/search/poi/json?api-version=1.0&query=${encodeURIComponent(term)}&lat=${lat}&lon=${lng}&radius=15000&limit=10&subscription-key=${MAPS_KEY}`;
-          console.log(`🔍 Searching for: ${term}`);
+      // Step 1: Search PeeringDB for data centers
+      console.log("🔍 Searching PeeringDB for data centers...");
+      try {
+        const peeringDbUrl = `https://www.peeringdb.com/api/fac?latitude__gte=${lat - 0.5}&latitude__lte=${lat + 0.5}&longitude__gte=${lng - 0.5}&longitude__lte=${lng + 0.5}`;
+        const peeringResponse = await fetch(peeringDbUrl);
+        
+        if (peeringResponse.ok) {
+          const peeringData = await peeringResponse.json();
+          console.log("📊 PeeringDB response:", peeringData);
           
-          const response = await fetch(searchUrl);
-          
-          if (!response.ok) {
-            console.error(`❌ API error for "${term}":`, response.status, response.statusText);
-            continue;
+          if (peeringData && peeringData.data && Array.isArray(peeringData.data) && peeringData.data.length > 0) {
+            const peeringCenters = peeringData.data
+              .filter(facility => facility && facility.latitude && facility.longitude)
+              .map((facility, index) => ({
+                id: `peering-${index}`,
+                name: facility.name || `Data Center ${index + 1}`,
+                type: 'data-center',
+                lat: parseFloat(facility.latitude),
+                lng: parseFloat(facility.longitude),
+                operator: facility.org?.name || 'Unknown Operator',
+                impact: 'HIGH HEAT',
+                description: `PeeringDB facility: ${facility.name || 'Data Center'} - Network infrastructure with high energy consumption`,
+                source: 'PeeringDB',
+                address: facility.address1 || 'Address not available'
+              }));
+            allDataCenters = allDataCenters.concat(peeringCenters);
+            console.log(`✅ Found ${peeringCenters.length} PeeringDB facilities`);
           }
-          
-          const data = await response.json();
-          console.log(`📊 Raw API response for "${term}":`, data);
-          
-          if (data.results && data.results.length > 0) {
-            console.log(`✅ Found ${data.results.length} results for "${term}"`);
-            allResults = allResults.concat(data.results);
-          } else {
-            console.log(`❌ No results for "${term}"`);
-          }
-        } catch (error) {
-          console.error(`❌ Failed to search for "${term}":`, error);
         }
+      } catch (error) {
+        console.error("❌ PeeringDB search failed:", error);
       }
       
-      console.log(`📊 Total raw results found: ${allResults.length}`);
+      // Step 2: Search OpenStreetMap for data centers
+      console.log("🔍 Searching OpenStreetMap for data centers...");
+      try {
+        const osmQuery = `
+          [out:json][timeout:25];
+          (
+            node["amenity"="data_center"](around:50000,${lat},${lng});
+            way["amenity"="data_center"](around:50000,${lat},${lng});
+            relation["amenity"="data_center"](around:50000,${lat},${lng});
+            node["industrial"="data_center"](around:50000,${lat},${lng});
+            way["industrial"="data_center"](around:50000,${lat},${lng});
+            relation["industrial"="data_center"](around:50000,${lat},${lng});
+            node["building"="data_center"](around:50000,${lat},${lng});
+            way["building"="data_center"](around:50000,${lat},${lng});
+            relation["building"="data_center"](around:50000,${lat},${lng});
+          );
+          out body;
+          >;
+          out skel qt;
+        `;
+        
+        const osmResponse = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: `data=${encodeURIComponent(osmQuery)}`
+        });
+        
+        if (osmResponse.ok) {
+          const osmData = await osmResponse.json();
+          console.log("📊 OSM response:", osmData);
+          
+          if (osmData && osmData.elements && Array.isArray(osmData.elements) && osmData.elements.length > 0) {
+            const osmCenters = osmData.elements
+              .filter(element => element && element.lat && element.lon)
+              .map((element, index) => ({
+                id: `osm-${element.id || index}`,
+                name: element.tags?.name || `Data Center ${index + 1}`,
+                type: 'data-center',
+                lat: parseFloat(element.lat),
+                lng: parseFloat(element.lon),
+                operator: element.tags?.operator || element.tags?.brand || 'Unknown Operator',
+                impact: 'HIGH HEAT',
+                description: `OSM facility: ${element.tags?.name || 'Data Center'} - ${element.tags?.description || 'Data center facility'}`,
+                source: 'OpenStreetMap',
+                address: element.tags && element.tags['addr:street'] ? 
+                  `${element.tags['addr:housenumber'] || ''} ${element.tags['addr:street'] || ''}`.trim() : 
+                  'Address not available'
+              }));
+            allDataCenters = allDataCenters.concat(osmCenters);
+            console.log(`✅ Found ${osmCenters.length} OSM facilities`);
+          }
+        }
+      } catch (error) {
+        console.error("❌ OSM search failed:", error);
+      }
       
-      // Remove duplicates and filter for relevant facilities
-      const uniqueResults = allResults.filter((result, index, self) => 
-        index === self.findIndex(r => 
-          r.position.lat === result.position.lat && 
-          r.position.lon === result.position.lon
+      // Step 3: Search EPA ECHO API for environmental impact data
+      console.log("🔍 Searching EPA ECHO for environmental impact data...");
+      try {
+        const epaUrl = `https://echo.epa.gov/api/echo/rest/geographic?latitude=${lat}&longitude=${lng}&radius=50&output=JSON`;
+        const epaResponse = await fetch(epaUrl);
+        
+        if (epaResponse.ok) {
+          const epaData = await epaResponse.json();
+          console.log("📊 EPA ECHO response:", epaData);
+          
+          if (epaData && epaData.results && Array.isArray(epaData.results) && epaData.results.length > 0) {
+            // Find facilities near data centers for environmental impact
+            const epaFacilities = epaData.results
+              .filter(facility => facility && facility.Latitude && facility.Longitude)
+              .map((facility, index) => ({
+                id: `epa-${facility.RegistryID || index}`,
+                name: facility.FacilityName || `EPA Facility ${index + 1}`,
+                type: 'environmental-impact',
+                lat: parseFloat(facility.Latitude),
+                lng: parseFloat(facility.Longitude),
+                operator: facility.ParentCompanyName || 'Unknown Operator',
+                impact: 'EMISSIONS',
+                description: `EPA facility: ${facility.FacilityName || 'Facility'} - Environmental impact data available`,
+                source: 'EPA ECHO',
+                address: facility.Address || 'Address not available',
+                violations: facility.Violations || 0,
+                lastInspection: facility.LastInspectionDate || 'Unknown'
+              }));
+            
+            // Add EPA facilities that are close to data centers
+            const nearbyEpaFacilities = epaFacilities.filter(epaFacility => {
+              return allDataCenters.some(dc => {
+                const distance = Math.sqrt(
+                  Math.pow(epaFacility.lat - dc.lat, 2) + 
+                  Math.pow(epaFacility.lng - dc.lng, 2)
+                );
+                return distance < 0.01; // Within ~1km
+              });
+            });
+            
+            allDataCenters = allDataCenters.concat(nearbyEpaFacilities);
+            console.log(`✅ Found ${nearbyEpaFacilities.length} nearby EPA facilities`);
+          }
+        }
+      } catch (error) {
+        console.error("❌ EPA ECHO search failed:", error);
+      }
+      
+      console.log(`📊 Total data centers found: ${allDataCenters.length}`);
+      
+      // Remove duplicates based on coordinates
+      const uniqueCenters = allDataCenters.filter((center, index, self) => 
+        index === self.findIndex(c => 
+          Math.abs(c.lat - center.lat) < 0.001 && 
+          Math.abs(c.lng - center.lng) < 0.001
         )
       );
       
-      console.log(`🔍 Unique results after deduplication: ${uniqueResults.length}`);
+      console.log(`🔍 Unique data centers after deduplication: ${uniqueCenters.length}`);
       
-      // More lenient filtering to catch more potential facilities
-      const relevantResults = uniqueResults.filter(result => {
-        const name = (result.poi?.name || '').toLowerCase();
-        const categories = (result.poi?.categorySet || []).map(cat => cat.name.toLowerCase());
-        const address = (result.address?.freeformAddress || '').toLowerCase();
+      if (uniqueCenters.length > 0) {
+        // Add environmental impact scores based on EPA data
+        const centersWithScores = uniqueCenters.map(center => {
+          let impactScore = 0;
+          let impactType = 'HIGH HEAT';
+          
+          if (center.source === 'EPA ECHO') {
+            impactScore = center.violations || 0;
+            impactType = impactScore > 5 ? 'EMISSIONS' : 'HEAT + NOISE';
+          } else if (center.source === 'PeeringDB') {
+            impactScore = 8; // High for network infrastructure
+            impactType = 'HIGH HEAT';
+          } else {
+            impactScore = 6; // Medium for general data centers
+            impactType = 'HEAT + NOISE';
+          }
+          
+          return {
+            ...center,
+            impactScore,
+            impact: impactType,
+            description: `${center.description} - Environmental Impact Score: ${impactScore}/10`
+          };
+        });
         
-        // Look for technology-related keywords in name, categories, or address
-        const techKeywords = [
-          'data', 'server', 'cloud', 'computing', 'ai', 'artificial intelligence',
-          'machine learning', 'technology', 'digital', 'tech', 'computing',
-          'facility', 'campus', 'center', 'company', 'corporation', 'inc',
-          'systems', 'solutions', 'services', 'research', 'development'
-        ];
-        
-        const isRelevant = techKeywords.some(keyword => 
-          name.includes(keyword) || 
-          categories.some(cat => cat.includes(keyword)) ||
-          address.includes(keyword)
-        );
-        
-        if (isRelevant) {
-          console.log(`✅ Relevant facility found: ${result.poi?.name} (${result.address?.freeformAddress})`);
-        }
-        
-        return isRelevant;
-      });
-      
-      console.log(`🤖 Relevant tech facilities: ${relevantResults.length}`);
-      
-      if (relevantResults.length > 0) {
-        const centers = relevantResults.slice(0, 6).map((result, index) => ({
-          id: index + 1,
-          name: result.poi?.name || `Technology Facility ${index + 1}`,
-          type: 'tech-facility',
-          lat: result.position.lat,
-          lng: result.position.lon,
-          operator: result.poi?.brands?.[0]?.name || result.poi?.name || 'Technology Company',
-          impact: ['HIGH HEAT', 'NOISE', 'HEAT + NOISE', 'EMISSIONS'][Math.floor(Math.random() * 4)],
-          description: `Technology facility at ${result.address?.freeformAddress || 'this location'} - Potential high energy consumption for computing operations`
-        }));
-        
-        console.log(`🏢 Setting ${centers.length} real tech facilities:`, centers);
-        setDataCenters(centers);
+        console.log(`🏢 Setting ${centersWithScores.length} real data centers with environmental scores:`, centersWithScores);
+        setDataCenters(centersWithScores);
         
         if (dsDataCenters.current) {
           console.log("🗺️ Clearing existing data centers from map");
           dsDataCenters.current.clear();
           
-          const features = centers.map(center => {
+          const features = centersWithScores.map(center => {
             const feature = new atlas.data.Feature(
               new atlas.data.Point([center.lng, center.lat]),
               { 
                 name: center.name,
                 operator: center.operator,
                 type: center.type,
-                impact: center.impact
+                impact: center.impact,
+                impactScore: center.impactScore,
+                source: center.source
               }
             );
-            console.log(`📍 Adding feature for ${center.name} at [${center.lng}, ${center.lat}]`);
+            console.log(`📍 Adding feature for ${center.name} at [${center.lng}, ${center.lat}] with score ${center.impactScore}`);
             return feature;
           });
           
-          console.log(`🗺️ Adding ${features.length} tech facility features to map`);
+          console.log(`🗺️ Adding ${features.length} data center features to map`);
           dsDataCenters.current.add(features);
           
           // Ensure the map shows all data centers
@@ -415,80 +499,23 @@ export default function App() {
           console.warn("⚠️ Data source not ready yet");
         }
       } else {
-        console.log("🔄 No real tech facilities found, using sample data");
-        // Fallback to sample AI data centers if no real ones found
-        const sampleAICenters = [
-          { 
-            id: 1, 
-            name: "AI Training Facility", 
-            type: "ai-facility", 
-            lat: lat + 0.005, 
-            lng: lng + 0.005, 
-            operator: "AI Research Corp",
-            impact: "HIGH HEAT",
-            description: "Large-scale AI model training facility with high GPU usage"
-          },
-          { 
-            id: 2, 
-            name: "Machine Learning Data Center", 
-            type: "ai-facility", 
-            lat: lat - 0.003, 
-            lng: lng - 0.003, 
-            operator: "ML Computing Inc",
-            impact: "HEAT + NOISE",
-            description: "Intensive computing for machine learning workloads"
-          },
-          { 
-            id: 3, 
-            name: "Cloud AI Facility", 
-            type: "ai-facility", 
-            lat: lat + 0.002, 
-            lng: lng - 0.004, 
-            operator: "Cloud AI Services",
-            impact: "EMISSIONS",
-            description: "Cloud-based AI processing center with high energy consumption"
-          }
-        ];
-        
-        console.log("🏢 Setting sample AI data centers:", sampleAICenters);
-        setDataCenters(sampleAICenters);
+        console.log("🔄 No real data centers found in this area");
+        setDataCenters([]);
         
         if (dsDataCenters.current) {
           dsDataCenters.current.clear();
-          const features = sampleAICenters.map(center => {
-            return new atlas.data.Feature(
-              new atlas.data.Point([center.lng, center.lat]),
-              { 
-                name: center.name,
-                operator: center.operator,
-                type: center.type,
-                impact: center.impact
-              }
-            );
-          });
-          console.log("🗺️ Adding sample data centers to map");
-          dsDataCenters.current.add(features);
         }
       }
     } catch (error) {
-      console.error("❌ Failed to fetch tech facilities:", error);
-      // Fallback to sample AI data centers on error
-      const sampleAICenters = [
-        { 
-          id: 1, 
-          name: "AI Training Facility", 
-          type: "ai-facility", 
-          lat: lat + 0.005, 
-          lng: lng + 0.005, 
-          operator: "AI Research Corp",
-          impact: "HIGH HEAT",
-          description: "Large-scale AI model training facility with high GPU usage"
-        }
-      ];
-      setDataCenters(sampleAICenters);
+      console.error("❌ Failed to fetch data centers:", error);
+      setDataCenters([]);
+      
+      if (dsDataCenters.current) {
+        dsDataCenters.current.clear();
+      }
     } finally {
       setLoadingDataCenters(false);
-      console.log("✅ Tech facility search completed");
+      console.log("✅ Data center search completed");
     }
   };
 
@@ -731,8 +758,12 @@ export default function App() {
                 <div className="map-controls">
                   <button className="map-btn" onClick={getUserLocation} title="Use My Location">📍</button>
                   <button className="map-btn" onClick={() => {
-                    if (userLocation) {
+                    if (selected) {
+                      fetchDataCenters(selected.lat, selected.lng);
+                    } else if (userLocation) {
                       fetchDataCenters(userLocation.lat, userLocation.lng);
+                    } else {
+                      alert("Please select a location first or use your current location");
                     }
                   }} title="Refresh Data Centers">🔄</button>
                   <button className="map-btn" onClick={changeMapStyle} title="Change Map Type">🗺️</button>
@@ -748,8 +779,12 @@ export default function App() {
                 <h4>Map Legend</h4>
                 <div className="legend-items">
                   <div className="legend-item">
-                    <span className="legend-icon">🤖</span>
-                    <span className="legend-text">AI Data Centers</span>
+                    <span className="legend-icon">🏢</span>
+                    <span className="legend-text">Data Centers (PeeringDB/OSM)</span>
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-icon">⚠️</span>
+                    <span className="legend-text">Environmental Impact (EPA ECHO)</span>
                   </div>
                   <div className="legend-item">
                     <span className="legend-icon">🔴</span>
@@ -770,7 +805,7 @@ export default function App() {
                     </div>
                     <div className="control-item">
                       <span className="control-icon">🔄</span>
-                      <span className="control-text">Search AI Data Centers</span>
+                      <span className="control-text">Search Real Data Centers</span>
                     </div>
                     <div className="control-item">
                       <span className="control-icon">🗺️</span>
@@ -792,23 +827,41 @@ export default function App() {
                 </div>
                 
                 <div className="impact-legend">
-                  <h5>AI Data Center Impact Levels:</h5>
+                  <h5>Environmental Impact Scores:</h5>
                   <div className="impact-items">
                     <div className="impact-item">
-                      <span className="impact-label high">HIGH HEAT</span>
-                      <span className="impact-desc">AI training facilities with high GPU usage and heat generation</span>
+                      <span className="impact-label high">HIGH HEAT (8-10)</span>
+                      <span className="impact-desc">PeeringDB facilities - Network infrastructure with high energy consumption</span>
                     </div>
                     <div className="impact-item">
-                      <span className="impact-label noise">NOISE</span>
-                      <span className="impact-desc">24/7 cooling systems for AI computing infrastructure</span>
+                      <span className="impact-label combined">HEAT + NOISE (6-7)</span>
+                      <span className="impact-desc">General data centers - Standard computing facilities</span>
                     </div>
                     <div className="impact-item">
-                      <span className="impact-label combined">HEAT + NOISE</span>
-                      <span className="impact-desc">Intensive AI computing causing multiple environmental impacts</span>
+                      <span className="impact-label emissions">EMISSIONS (5+)</span>
+                      <span className="impact-desc">EPA facilities with environmental violations</span>
                     </div>
                     <div className="impact-item">
-                      <span className="impact-label emissions">EMISSIONS</span>
-                      <span className="impact-desc">High energy consumption from AI model training and inference</span>
+                      <span className="impact-label low">LOW IMPACT (1-4)</span>
+                      <span className="impact-desc">Facilities with minimal environmental impact</span>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="data-sources-legend">
+                  <h5>Data Sources:</h5>
+                  <div className="data-sources-items">
+                    <div className="data-source-item">
+                      <span className="data-source-icon">🏢</span>
+                      <span className="data-source-text">PeeringDB - Internet exchange and data center locations</span>
+                    </div>
+                    <div className="data-source-item">
+                      <span className="data-source-icon">🗺️</span>
+                      <span className="data-source-text">OpenStreetMap - Community-maintained facility data</span>
+                    </div>
+                    <div className="data-source-item">
+                      <span className="data-source-icon">⚠️</span>
+                      <span className="data-source-text">EPA ECHO - Environmental compliance and violation data</span>
                     </div>
                   </div>
                 </div>
@@ -822,7 +875,7 @@ export default function App() {
                     </div>
                     <div className="debug-item">
                       <span className="debug-icon">🔍</span>
-                      <span className="debug-text">Test API - Checks Azure Maps Search API responses</span>
+                      <span className="debug-text">Test API - Checks data source API responses</span>
                     </div>
                   </div>
                 </div>
@@ -1034,7 +1087,7 @@ export default function App() {
         {activeSection === 'data-centers' && (
           <div className="data-centers-view">
             <div className="section-header">
-              <h2>🤖 AI Data Centers</h2>
+              <h2>🏢 Real Data Centers & Environmental Impact</h2>
               <button 
                 onClick={() => {
                   if (selected) {
@@ -1055,9 +1108,9 @@ export default function App() {
             <div className="data-centers-grid">
               {dataCenters.length === 0 ? (
                 <div className="empty-state">
-                  <span>🤖</span>
-                  <h3>No AI data centers found</h3>
-                  <p>Select a location on the map or use your current location to search for nearby AI and technology facilities.</p>
+                  <span>🏢</span>
+                  <h3>No data centers found</h3>
+                  <p>Select a location on the map or use your current location to search for nearby data centers and environmental impact data from PeeringDB, OpenStreetMap, and EPA ECHO.</p>
                   <button 
                     className="btn-primary"
                     onClick={() => {
@@ -1076,11 +1129,14 @@ export default function App() {
                   <div key={center.id} className="data-center-card">
                     <div className="data-center-header">
                       <div className="data-center-name">
-                        <span>🤖</span>
+                        <span>{center.source === 'EPA ECHO' ? '⚠️' : '🏢'}</span>
                         <span>{center.name}</span>
                       </div>
                       <div className="data-center-impact">
                         <span className="impact-badge">{center.impact}</span>
+                        {center.impactScore && (
+                          <span className="impact-score">Score: {center.impactScore}/10</span>
+                        )}
                       </div>
                     </div>
                     
@@ -1090,13 +1146,35 @@ export default function App() {
                         <span>Operator: {center.operator}</span>
                       </div>
                       <div className="detail-item">
+                        <span>📊</span>
+                        <span>Source: {center.source}</span>
+                      </div>
+                      <div className="detail-item">
                         <span>⚠️</span>
                         <span>{center.description}</span>
                       </div>
+                      {center.address && center.address !== 'Address not available' && (
+                        <div className="detail-item">
+                          <span>📍</span>
+                          <span>Address: {center.address}</span>
+                        </div>
+                      )}
                       <div className="detail-item">
-                        <span>📍</span>
-                        <span>{center.lat.toFixed(6)}, {center.lng.toFixed(6)}</span>
+                        <span>🌍</span>
+                        <span>Coordinates: {center.lat.toFixed(6)}, {center.lng.toFixed(6)}</span>
                       </div>
+                      {center.violations !== undefined && (
+                        <div className="detail-item">
+                          <span>🚨</span>
+                          <span>EPA Violations: {center.violations}</span>
+                        </div>
+                      )}
+                      {center.lastInspection && center.lastInspection !== 'Unknown' && (
+                        <div className="detail-item">
+                          <span>📅</span>
+                          <span>Last Inspection: {center.lastInspection}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))
